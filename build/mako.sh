@@ -1,4 +1,7 @@
 #!/bin/bash
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+cd "$script_dir" || exit 1
+
 executables="zip"
 
 for i in $executables; do
@@ -14,11 +17,9 @@ if [ -d "MakoBuild" ]; then rm -rf MakoBuild; fi
 mkdir MakoBuild || exit 1
 cd MakoBuild || exit 1
 
-#We must also include hidden files/directories
-shopt -s dotglob
-
-cp -R ../../src/core/* . || exit 1
-cp -R ../../src/mako/* . || exit 1
+# Copy the complete trees, including hidden files/directories such as .lua.
+cp -R ../../src/core/. . || exit 1
+cp -R ../../src/mako/. . || exit 1
 
 # USE_OPCUA=2 - include only C-part
 # USE_OPCUA=1 - include C and LUA parts
