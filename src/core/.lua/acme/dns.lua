@@ -270,8 +270,12 @@ function M.createClient(options)
 
    function client:isRegistered(callback)
       return begin(callback,function()
-         local result,requestErr=devicePost("IsRegistered")
-         if not result then return nil,requestErr end
+         local result,requestErr
+         -- SharkCA's SetIpAddress authenticates and returns the full registration state.
+         if not private then
+            result,requestErr=devicePost("IsRegistered")
+            if not result then return nil,requestErr end
+         end
          local address,addressErr=networkAddress()
          if not address then return nil,addressErr end
          local updated,updateErr=devicePost("SetIpAddress",{ipAddress=address})

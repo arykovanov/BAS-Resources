@@ -109,6 +109,7 @@ function M.createManager(options)
    local retryDelay=retryFirst
    local stopCount=0
    local installing=0
+   local installedRecords
    local pendingUpdates,drainUpdates={}
 
    local function emit(...) safeCallback(notify,...) end
@@ -152,13 +153,23 @@ function M.createManager(options)
 
    local function installProfile(profile,callback)
       local records=certificateList(profile)
+      -- Status/ARI checks must not replace listeners when their keys/certificates are unchanged.
+      local same=installedRecords and #records == #installedRecords
+      for i,record in ipairs(records) do
+         local old=installedRecords and installedRecords[i]
+         if not old or record.domain ~= old.domain or record.privateKey ~= old.privateKey or
+            record.certificate ~= old.certificate then same=false break end
+      end
+      if same then return safeCallback(callback,true) end
+      -- An installer may fail after changing listeners. Retry even the previously installed set.
+      installedRecords=nil
       installing=installing+1
       local called=false
       local function done(ok,message)
          if called then return end
          called=true
          installing=installing-1
-         if ok then safeCallback(callback,true) else
+         if ok then installedRecords=records safeCallback(callback,true) else
             safeCallback(callback,nil,errorTable("certificate_install_failed",
                type(message) == "table" and message.message or tostring(message)))
          end
