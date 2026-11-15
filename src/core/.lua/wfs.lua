@@ -7,10 +7,6 @@ local function trim(s)
    end
 end
 
-local function addpath(path,name)
-   return fmt("%s/%s",path,name):gsub("//","/")
-end
-
 local function isAjaxReq(_ENV)
    if jsonrsp or (cmd.header and cmd:header"x-requested-with") then
       return true
@@ -93,6 +89,30 @@ local function sendresp(_ENV,emsg,ok,err,exterr)
    cmd:abort()
 end
 
+-- Use the same root-relative path for ACLs, locks, and I/O.
+local function invalidpath(_ENV)
+   if not cmd.write then cmd=cmd:response() end
+   sendresp(_ENV,"Invalid path",false,"invalidname")
+end
+
+local function normalizepath(_ENV,rel)
+   local parts={}
+   if not rel:find("[%z\\:]") then
+      for part in rel:gmatch("[^/]+") do
+         if part == ".." then
+            if #parts == 0 then
+               return invalidpath(_ENV)
+            end
+            parts[#parts]=nil
+         elseif part ~= "." then
+            parts[#parts+1]=part
+         end
+      end
+      return table.concat(parts,"/")..(#parts > 0 and rel:sub(-1) == "/" and "/" or "")
+   end
+   invalidpath(_ENV)
+end
+
 local asyncSendresp
 if ba.thread and ba.thread.run then -- If installed
    asyncSendresp=function(_ENV,emsg,ok,err,exterr)
@@ -131,6 +151,7 @@ local function newWFS(name,priority,io,lockdir,maxuploads,maxlocks,lspfunc)
    local uploader=ba.create.upload(io,maxuploads)
 
    local function sessionuri(_ENV,rel)
+      authorize(_ENV,rel,"PROPFIND",true)
       local id
       local uri
       if hasSesUri then
@@ -175,7 +196,7 @@ local function newWFS(name,priority,io,lockdir,maxuploads,maxlocks,lspfunc)
       if not dir or #dir == 0 then
 	 sendresp(_ENV,"Cannot create directory",false,"invalidname")
       end
-      rel=rel..dir
+      rel=normalizepath(_ENV,rel..dir)
       authorize(_ENV,rel,"MKCOL")
       sendresp(_ENV,"Cannot create "..rel,io:mkdir(rel))
    end
@@ -184,16 +205,22 @@ local function newWFS(name,priority,io,lockdir,maxuploads,maxlocks,lspfunc)
       local data=request:data()
       local from,to=trim(data.from),trim(data.to)
       if from and to then
+         local base=resrdr:baseuri()
+         if to:sub(1,#base) ~= base then
+            sendresp(_ENV,"Invalid destination",false,"invalidname")
+         end
+         to=normalizepath(_ENV,to:sub(#base+1))
 	 local st = io:stat(rel)
 	 if st and st.isdir then
-	    from = addpath(rel,from)
+	    from = normalizepath(_ENV,rel.."/"..from)
 	    authorize(_ENV, from, "DELETE")
 	    checklock(_ENV,from)
 	    authorize(_ENV, to, "PUT")
+	    checklock(_ENV,to)
 	    local function errmsg()
 	       return fmt("Cannot rename %s -> %s",from, to)
 	    end
-	    checkresp(_ENV,errmsg,io:rename(from,to:sub(#resrdr:baseuri())))
+	    checkresp(_ENV,errmsg,io:rename(from,to))
 	    sendresp(_ENV,nil,true)
 	 end
       end
@@ -239,22 +266,22 @@ local function newWFS(name,priority,io,lockdir,maxuploads,maxlocks,lspfunc)
       if not fn or #fn == 0 then
 	 sendresp(_ENV,"Cannot delete resource",false,"invalidname")
       end
-      DELETE(_ENV,rel..fn)
+      DELETE(_ENV,normalizepath(_ENV,rel..fn))
    end
 
    local function getlock(_ENV,rel)
       local owner,time
       local name = cmd:data("name")
       if not name then sendresp(_ENV,"Missing lock name",false,"invalidname") end
-      local pn=rel..name
+      local pn=normalizepath(_ENV,rel..name)
+      authorize(_ENV,pn,"PROPFIND",true)
       if dav:lockmgr(pn) then
 	 owner,time=getLockOwner(_ENV,pn)
       else
 	 local st = io:stat(pn)
 	 if st and st.isdir then
-	    name=name:match"([^/]+)/$"
-	    if name then
-	       pn=rel..name
+	    if pn:sub(-1) == "/" then
+	       pn=pn:sub(1,-2)
 	       if dav:lockmgr(pn) then
 		  owner,time=getLockOwner(_ENV,pn)
 	       end
@@ -271,7 +298,8 @@ local function newWFS(name,priority,io,lockdir,maxuploads,maxlocks,lspfunc)
       local files={}
       for n,v in request:datapairs() do
 	 if n=="n" then
-	    local name=rel..v
+	    local name=normalizepath(_ENV,rel..v)
+	    authorize(_ENV,name,"PROPFIND",true)
 	    local st = io:stat(name)
 	    if st and not st.isdir then
 	       tinsert(files, {n=v,l=dav:lockmgr(name) and getLockOwner(_ENV,name) or false})
@@ -287,10 +315,10 @@ local function newWFS(name,priority,io,lockdir,maxuploads,maxlocks,lspfunc)
       if time and time > tnow then
 	 for n,v in request:datapairs() do
 	    if n=="n" then
-	       local name=rel..v
+	       local name=normalizepath(_ENV,rel..v)
+	       authorize(_ENV,name,"PUT")
 	       local st = io:stat(name)
 	       if st and not st.isdir and not dav:lockmgr(name) then
-		  authorize(_ENV,name,"PUT")
 		  dav:lockmgr(name,cmd,time - tnow)
 	       end
 	    end
@@ -302,9 +330,9 @@ local function newWFS(name,priority,io,lockdir,maxuploads,maxlocks,lspfunc)
    local function unlock(_ENV,rel)
       for n,v in request:datapairs() do
 	 if n=="n" then
-	    local name=rel..v
+	    local name=normalizepath(_ENV,rel..v)
+	    authorize(_ENV,name,"PUT")
 	    if dav:lockmgr(name) then
-	       authorize(_ENV,name,"PUT")
 	       dav:lockmgr(name,false)
 	    end
 	 end
@@ -354,6 +382,10 @@ local function newWFS(name,priority,io,lockdir,maxuploads,maxlocks,lspfunc)
       filename=up:url()..up:name()
       cmd=up
       local fn=up:name()
+      -- The uploader owns this name: reject aliases instead of rewriting it.
+      local pn=normalizepath(_ENV,fn)
+      if not pn then return end
+      if pn ~= fn then return invalidpath(_ENV) end
       authorize(_ENV, fn, "PUT")
       checklock(_ENV,fn)
    end
@@ -445,6 +477,7 @@ local function newWFS(name,priority,io,lockdir,maxuploads,maxlocks,lspfunc)
    local function service(_ENV,rel,session)
       if filterservice then rel=filterservice(_ENV,rel,session) end
       cmd=request
+      rel=normalizepath(_ENV,rel)
       _ENV.dav=dav
       local ua,site = request:header"User-Agent",request:header"Sec-Fetch-Site"
       if site and "cross-site" == site then sendresp(_ENV,"Access denied",false,"noaccess") end
